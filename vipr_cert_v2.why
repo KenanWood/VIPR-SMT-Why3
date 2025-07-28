@@ -1,0 +1,934 @@
+
+module Sum
+  use import int.Int
+  use import real.Real
+  use import real.RealInfix
+
+  let rec ghost function sum (f: int -> real) (a b: int) : real
+    requires { Int.(<=) a b }
+    variant { Int.(-) b a }
+  = if a = b then 0.0 else f a +. sum f (a + 1) b
+
+end
+
+theory Init
+
+  use import int.Int
+  use import array.Array
+
+  function init (n: int) (f: int -> real) : array real
+
+  axiom init_spec:
+    forall f n. n >= 0 ->
+      (forall i. 0 <= i < n -> (init n f)[i] = f i) /\
+      length (init n f) = n
+
+end
+
+theory VIPRCertificate
+
+  use import int.Int
+  use import int.Lex2
+  use import real.Real
+  use import real.RealInfix
+  use import real.FromInt
+  use import array.Array
+  use import set.Set
+  use import Sum
+  
+  predicate is_integer (x: real) =
+    exists i: int. x = from_int i
+
+  (* ---------- Type and constants ---------- *)
+
+  (* Dimensions of the certificate *)
+  constant n : int   (* number of variables *)
+  constant m : int   (* number of original constraints *)
+  constant d : int   (* total number of constraints *)
+  
+  (* Dimension assumptions *)
+  axiom H_con : Int.(<) 0 m /\ Int.(<=) m d
+  axiom H_var : Int.(>) n 0
+  
+  (* Basic types *)
+  type sign =
+    | Leq
+    | Geq
+    | Eq
+  
+  function sign_to_int (s: sign) : int =
+    match s with
+    | Leq -> -1
+    | Geq -> 1
+    | Eq -> 0
+    end
+  
+  type constraint = {
+    a : array real;
+    b : real;
+    s : sign
+  }
+  
+  predicate is_constraint (con: constraint) = Array.length con.a = n
+  
+  function dot (a b: array real) : real =
+    sum (fun i -> a[i] *. b[i]) 0 n
+  
+  predicate sat_constraint (sol: array real) (con: constraint) =
+    match con.s with
+    | Leq -> dot con.a sol <= con.b
+    | Geq -> dot con.a sol >= con.b
+    | Eq -> dot con.a sol = con.b
+    end
+  
+  type objective_sense = 
+    | Min
+    | Max
+   
+  type objective_function = {
+    c : array real;
+    sense : objective_sense;
+  }
+  
+  predicate is_objective_function (obj_func: objective_function) = Array.length obj_func.c = n
+  
+  type lower_bound =
+    | LNone
+    | LNum real
+  
+  type upper_bound =
+    | UNone
+    | UNum real
+  
+  type interval = {
+    lb: lower_bound;
+    ub: upper_bound
+  }
+    
+  type rtp_type =
+    | Infeasible
+    | Interval interval
+  
+  (* No need to use indexed_points right now, as this was for efficiency in checking *)
+  
+  type reason =
+    | Asm
+    | Lin
+    | Rnd
+    | Uns
+    | Sol
+  
+  type reason_data =
+    | D_none                      (* for Asm and Sol *)
+    | D_lin_comb (array real)      (* for Lin and Rnd: dense array of length d *)
+    | D_uns (array int)            (* for Uns: array of 4 indices in [0, d) *)
+  
+  predicate valid_reason_data (r: reason) (rd: reason_data) =
+    match r, rd with
+    | Asm, D_none -> true
+    | Sol, D_none -> true
+    | Lin, D_lin_comb arr -> Array.length arr = d
+    | Rnd, D_lin_comb arr -> Array.length arr = d
+    | Uns, D_uns arr ->
+        Array.length arr = 4 /\
+        forall i: int. lt_nat i 4 ->
+          lt_nat arr[i] d
+    | _, _ -> false
+    end
+  
+  type derived_constraint = {
+    con: constraint;
+    rsn: reason;
+    data: reason_data;
+    a_set: set int;
+  }
+  
+  predicate is_der_con (dc: derived_constraint) =
+    is_constraint dc.con /\ valid_reason_data dc.rsn dc.data /\
+    forall i: int. mem i dc.a_set -> (lt_nat i d /\ not (lt_nat i m))
+  
+  lemma valid_reason_data_Asm:
+  valid_reason_data Asm D_none
+  
+  lemma valid_reason_data_does_imply_data_none:
+  forall rsn: reason, dat: reason_data.
+    valid_reason_data rsn dat -> rsn = Asm -> dat = D_none
+    
+  function index_from_der_index (der_i: int) : int = Int.(+) der_i m
+  
+  type certificate = {
+    cINT: set int;
+    cOBJ: objective_function;
+    cCON: array constraint;
+    cRTP: rtp_type;
+    cSOL: set (array real); (* check that each array has length n below *)
+    cDER: array derived_constraint;
+  }
+  
+  predicate is_asm_index (cert: certificate) (i: int) =
+    Int.(<=) m i /\ Int.(<) i d /\
+    let j = Int.(-) i m in
+    lt_nat j (length cert.cDER) /\
+    let dc = cert.cDER[j] in
+    dc.rsn = Asm
+  
+  (* check all dimensions and all other requirements *) (* DONE WITH THIS *)
+  predicate is_cert (cert: certificate) =
+    (forall i: int. mem i cert.cINT -> lt_nat i n) /\
+    (is_objective_function cert.cOBJ) /\
+    (length cert.cCON = m) /\ (forall i: int. lt_nat i m -> is_constraint cert.cCON[i]) /\
+    (forall sol: (array real). mem sol cert.cSOL -> length sol = n) /\ 
+    (* derived constraint predicates *)
+    (length cert.cDER = Int.(-) d m) /\ (* length of DER is d-m *)
+    (forall idx: int. lt_nat idx (length cert.cDER) -> is_der_con cert.cDER[idx]) /\ (* each one is a derived constraint *)
+    (forall idx: int. lt_nat idx (length cert.cDER) -> 
+      forall i: int. mem i cert.cDER[idx].a_set -> is_asm_index cert i) (* all assumptions of each one are assumptions *)
+
+
+  lemma valid_reason_data_from_is_cert:
+  forall cert: certificate, k: int.
+    is_cert cert -> lt_nat k (Int.(-) d m) ->
+    valid_reason_data cert.cDER[k].rsn cert.cDER[k].data
+
+end
+
+theory VIPRHelpers
+  
+  use import VIPRCertificate
+  use import int.Int
+  use import int.Lex2
+  use import real.Real
+  use import real.RealInfix
+  use import real.FromInt
+  use import real.Truncate
+  use import array.Array
+  use import array.ArrayEq
+  use import set.Set
+  use import Sum
+  use import Init
+  
+  (* Defining generalied versions of signs and constraints for linear combination constraints *)
+  type generalized_sign =
+    | Sign sign
+    | SNone
+  type generalized_constraint = {
+    lhs: array real;
+    rhs: real;
+    sgn: generalized_sign
+  }
+  function get_constraint (cert: certificate) (k: int) : constraint =
+    if Int.(<) k m then cert.cCON[k] else cert.cCON[Int.(-) k m]
+    
+  predicate is_absurdity (con: constraint) =
+    (forall i: int. lt_nat i n -> con.a[i] = 0.0) /\
+    match con.s with
+    | Geq -> con.b > 0.0
+    | Leq -> con.b < 0.0
+    | Eq -> false
+    end
+    
+  predicate con_dom_con (c1: constraint) (c2: constraint) =
+    (is_absurdity c1) \/
+    (
+      (array_eq c1.a c2.a) /\
+      match c1.s, c2.s with
+        | Eq, Geq -> c1.b >= c2.b
+        | Eq, Eq -> c1.b = c2.b
+        | Eq, Leq -> c1.b <= c2.b
+        | Geq, Geq -> c1.b >= c2.b
+        | Leq, Leq -> c1.b <= c2.b
+        | _, _ -> false
+      end
+    )
+  
+  predicate gen_con_dom_con (c1: generalized_constraint) (c2: constraint) =
+    match c1.sgn with
+    | SNone -> false
+    | Sign sign -> con_dom_con { a = c1.lhs; b = c1.rhs; s = sign } c2
+    end
+  
+  function get_lin_comb (*Below: length weights = d *)
+    (cert: certificate) (weights: array real) : generalized_constraint =
+    {
+      lhs = init n (fun j -> (sum (fun i -> weights[i] *. (get_constraint cert i).a[j]) 0 d));
+      rhs = sum (fun i -> weights[i] *. (get_constraint cert i).b) 0 d;
+      sgn =
+        let sgn_prod =
+          fun i -> weights[i] *. (from_int (sign_to_int (get_constraint cert i).s))
+        in
+        let all_nonneg : bool = forall i: int. lt_nat i d -> sgn_prod i >= 0.0 in
+        let some_pos   : bool = exists i: int. lt_nat i d /\ sgn_prod i > 0.0 in
+        let all_zero   : bool = forall i: int. lt_nat i d -> sgn_prod i = 0.0 in
+        let all_nonpos : bool = forall i: int. lt_nat i d -> sgn_prod i <= 0.0 in
+        let some_neg   : bool = exists i: int. lt_nat i d /\ sgn_prod i < 0.0 in
+          if all_nonneg /\ some_pos then Sign Geq
+          else if all_zero then Sign Eq
+          else if all_nonpos /\ some_neg then Sign Leq
+          else SNone
+    }
+  
+  (* Rnd versions of above *)
+  predicate roundable (cert: certificate) (con: constraint) =
+    con.s <> Eq /\
+    forall i. lt_nat i n -> 
+      if mem i cert.cINT then is_integer con.a[i] else con.a[i] = 0.0
+  
+  function rnd (cert: certificate) (con: constraint) : constraint =
+    if not roundable cert con then con else
+      match con.s with
+      | Geq -> { a = con.a; b = (from_int (ceil con.b)); s = Geq }
+      | Leq -> { a = con.a; b = (from_int (floor con.b)); s = Leq }
+      | Eq -> con
+      end
+  
+  predicate rnd_con_dom_con (cert: certificate) (c1: constraint) (c2: constraint) =
+    if roundable cert c1 then con_dom_con (rnd cert c1) c2 else false
+  
+  predicate rnd_gen_con_dom_con (cert: certificate) (c1: generalized_constraint) (c2: constraint) =
+    match c1.sgn with
+    | SNone -> false
+    | Sign sign -> rnd_con_dom_con cert { a = c1.lhs; b = c1.rhs; s = sign } c2
+    end
+  
+  predicate is_disjunction (cert: certificate) (c1: constraint) (c2: constraint) =
+    (array_eq c1.a c2.a) /\ (forall i. lt_nat i n -> 
+    if mem i cert.cINT then is_integer c1.a[i] else c1.a[i] = 0.0) /\
+    (is_integer c1.b /\ is_integer c2.b) /\  
+      match c1.s, c2.s with
+      | Geq, Leq -> c1.b - c2.b = 1.0
+      | Leq, Geq -> c2.b - c1.b = 1.0
+      | _, _ -> false
+      end
+  
+  predicate is_asm_of (cert: certificate) (j i: int) = (* is j in A(C_i) *)
+    if lt_nat i m then false else mem j cert.cDER[Int.(-) i m].a_set
+  
+end
+
+theory VIPRValidity
+
+  use import VIPRCertificate
+  use import VIPRHelpers
+  use import int.Int
+  use import int.Lex2
+  use import real.Real
+  use import real.RealInfix
+  use import real.FromInt
+  use import array.Array
+  use import set.Set
+  
+  predicate valid_FEAS (cert: certificate) = 
+    forall sol: (array real). mem sol cert.cSOL -> 
+      (forall j: int. mem j cert.cINT -> is_integer sol[j]) /\
+      (forall i: int. lt_nat i m -> sat_constraint sol cert.cCON[i])
+  
+  predicate valid_SOL (cert: certificate) = 
+    match cert.cRTP with
+    | Infeasible -> is_empty cert.cSOL
+    | Interval interval -> valid_FEAS cert /\
+      match interval.ub with
+      | UNone -> true
+      | UNum upper -> (cert.cOBJ.sense = Min -> 
+        exists x: array real. mem x cert.cSOL /\ sat_constraint x { a = cert.cOBJ.c; b = upper; s = Leq })
+      end /\
+      match interval.lb with
+      | LNone -> true
+      | LNum lower -> (cert.cOBJ.sense = Max -> 
+        exists x: array real. mem x cert.cSOL /\ sat_constraint x { a = cert.cOBJ.c; b = lower; s = Geq })
+      end
+    end
+    
+  (* k is the index of cert.cDER, so k+m is the ``total'' index *)
+  predicate valid_DER_k (cert: certificate) (k: int) =
+    let dc = cert.cDER[k] in
+    let total_k = Int.(+) k m in
+    match dc.rsn, dc.data with
+    | Asm, D_none -> 
+        dc.a_set = add (Int.(+) k m) empty
+    | Lin, D_lin_comb weights -> 
+        (forall i: int. weights[i] <> 0.0 -> lt_nat i total_k) /\
+        (gen_con_dom_con (get_lin_comb cert weights) dc.con) /\
+        (forall j: int. 
+          mem j dc.a_set <-> 
+            exists i: int. (weights[i] <> 0.0 /\ mem j cert.cDER[(Int.(-) i m)].a_set))
+    | Rnd, D_lin_comb weights -> 
+        (forall i: int. weights[i] <> 0.0 -> lt_nat i total_k) /\
+        (rnd_gen_con_dom_con cert (get_lin_comb cert weights) dc.con) /\
+        (forall j: int. 
+          mem j dc.a_set <-> 
+            exists i: int. (weights[i] <> 0.0 /\ mem j cert.cDER[(Int.(-) i m)].a_set))
+    | Uns, D_uns indices -> 
+        let i1 = indices[0] in
+        let l1 = indices[1] in
+        let i2 = indices[2] in
+        let l2 = indices[3] in
+        lt_nat i1 total_k /\ lt_nat l1 total_k /\ lt_nat i2 total_k /\ lt_nat l2 total_k /\
+        let ci1 = get_constraint cert i1 in
+        let cl1 = get_constraint cert l1 in
+        let ci2 = get_constraint cert i2 in
+        let cl2 = get_constraint cert l2 in
+        con_dom_con ci1 dc.con /\
+        con_dom_con ci2 dc.con /\
+        is_disjunction cert cl1 cl2 /\
+        (forall j: int.
+          is_asm_of cert j total_k <-> (
+            (is_asm_of cert j i1 /\ j <> l1) \/
+            (is_asm_of cert j i2 /\ j <> l2)
+          )
+        )
+    | Sol, D_none -> 
+        is_empty dc.a_set /\ exists sol: array real. (mem sol cert.cSOL ->
+          (cert.cOBJ.sense = Min -> con_dom_con 
+            { a = cert.cOBJ.c; b = dot cert.cOBJ.c sol; s = Leq }
+            dc.con) /\
+          (cert.cOBJ.sense = Max -> con_dom_con 
+            { a = cert.cOBJ.c; b = dot cert.cOBJ.c sol; s = Geq }
+            dc.con))
+    | _, _ -> false
+    end
+  
+  predicate valid_DER (cert: certificate) = 
+    (forall k: int. lt_nat k (Int.(-) d m) -> valid_DER_k cert k) /\
+    let d_index = Int.(-) d 1 in
+    let cd = get_constraint cert d_index
+    in
+    match cert.cRTP, cert.cOBJ.sense with
+    | Infeasible, _ -> (forall j: int. not is_asm_of cert j d_index) /\ is_absurdity cd
+    | Interval interval, Min -> 
+      match interval.lb with
+      | LNone -> true
+      | LNum lower -> con_dom_con cd { a = cert.cOBJ.c; b = lower; s = Geq } /\
+         forall j: int. not is_asm_of cert j d_index
+      end
+    | Interval interval, Max -> 
+      match interval.ub with
+      | UNone -> true
+      | UNum upper -> con_dom_con cd { a = cert.cOBJ.c; b = upper; s = Leq } /\
+         forall j: int. not is_asm_of cert j d_index
+      end
+    end
+  
+  predicate valid (cert: certificate) = valid_SOL cert /\ valid_DER cert
+
+end
+
+
+theory VIPRPredicate
+
+  use import VIPRCertificate
+  use import VIPRHelpers
+  use import int.Int
+  use import int.Lex2
+  use import real.Real
+  use import real.RealInfix
+  use import real.FromInt
+  use import real.Truncate
+  use import array.Array
+  use import set.Set
+  use import Sum
+  use import Init
+    
+  predicate p (cert: certificate) = 
+    match cert.cOBJ.sense with
+    | Min -> true
+    | Max -> false
+    end
+  
+  predicate r (cert: certificate) = 
+    match cert.cRTP with
+    | Infeasible -> false
+    | Interval _ -> true
+    end
+  
+  predicate pub (cert: certificate) =
+    match cert.cRTP with
+    | Interval i ->
+      match i.ub with
+      | UNone -> false
+      | UNum _ -> true
+      end
+    | Infeasible -> false
+    end
+  
+  function u (cert: certificate) : real =
+    match cert.cRTP with
+    | Interval i ->
+      match i.ub with
+      | UNone -> 0.0
+      | UNum x -> x
+      end
+    | Infeasible -> 0.0
+    end
+      
+  predicate plb (cert: certificate) =
+    match cert.cRTP with
+    | Interval i ->
+        match i.lb with
+        | LNone -> false
+        | LNum _ -> true
+        end
+    | Infeasible -> false
+    end
+  
+  function l (cert: certificate) : real =
+    match cert.cRTP with
+    | Interval i ->
+      match i.lb with
+      | LNone -> 0.0
+      | LNum x -> x
+      end
+    | Infeasible -> 0.0
+    end
+  
+  predicate phi_FEAS (cert: certificate) = 
+    forall sol: (array real). mem sol cert.cSOL -> 
+      (forall j: int. mem j cert.cINT -> is_integer sol[j]) /\
+      (forall i: int. lt_nat i m -> 
+        (Int.(>=) (sign_to_int cert.cCON[i].s) 0 -> dot cert.cCON[i].a sol >= cert.cCON[i].b) /\
+        (Int.(<=) (sign_to_int cert.cCON[i].s) 0 -> dot cert.cCON[i].a sol <= cert.cCON[i].b)
+      )
+
+  predicate phi_SOL (cert: certificate) = 
+    if not r cert then is_empty cert.cSOL else
+    (phi_FEAS cert /\ (if p cert then
+    (pub cert -> 
+      exists sol: array real. mem sol cert.cSOL /\ sat_constraint sol { a = cert.cOBJ.c; b = u cert; s = Leq }
+    ) else
+    (plb cert ->
+      exists sol: array real. mem sol cert.cSOL /\ sat_constraint sol { a = cert.cOBJ.c; b = l cert; s = Geq }
+    )))
+  
+  (* k is the DER constraint index here, as usual *)
+  predicate phi_ASM (cert: certificate) (k: int) =
+    let k_total = Int.(+) k m in
+    let dc = cert.cDER[k] in
+    (forall j. ((is_asm_index cert j /\ Int.(>) j k_total) -> not is_asm_of cert j k_total)) /\
+    match dc.rsn, dc.data with
+    | Asm, D_none -> is_asm_of cert k_total k_total /\ 
+        forall j: int. 
+          ((is_asm_index cert j /\ Int.(<) j k_total) -> not is_asm_of cert j k_total)
+    | Lin, D_lin_comb weights | Rnd, D_lin_comb weights -> 
+        forall j: int. ((is_asm_index cert j /\ Int.(<) j k_total) ->
+          (is_asm_of cert j k_total = 
+          exists i: int. 
+            ((weights[i] <> 0.0 /\ Int.(<=) j i /\ Int.(<) i k_total) /\ is_asm_of cert j i)))
+    | Uns, D_uns indices -> 
+        let i1 = indices[0] in
+        let l1 = indices[1] in
+        let i2 = indices[2] in
+        let l2 = indices[3] in
+        forall j: int. ((is_asm_index cert j /\ Int.(<) j k_total) ->
+          ((is_asm_of cert j k_total) = ((is_asm_of cert j i1 /\ j <> l1) \/ (is_asm_of cert j i2 /\ j <> l2))))
+    | Sol, D_none -> 
+        forall j: int. 
+          ((is_asm_index cert j /\ Int.(<) j k_total) -> not is_asm_of cert j k_total)
+    | _, _ -> false
+    end
+    
+  predicate phi_DOM_expanded
+  (a1 a2: array real) (b1 b2: real) (eq1 eq2 geq1 geq2 leq1 leq2: bool) =
+    (
+    (forall j: int. lt_nat j n -> a1[j] = 0.0) /\ 
+    (if eq1 then b1 <> 0.0 else 
+      if geq1 then b1 > 0.0 else 
+        if leq1 then b1 < 0.0 else false)
+    )
+    \/
+    (
+    (forall j: int. lt_nat j n -> a1[j] = a2[j]) /\ 
+    (if eq2 then eq1 /\ b1 = b2 else 
+      if geq2 then geq1 /\ b1 >= b2 else 
+        if leq2 then leq1 /\ b1 <= b2 else false)
+    )
+  
+  predicate phi_DOM_constr (c1 c2 : constraint) =
+    phi_DOM_expanded
+      c1.a c2.a
+      c1.b c2.b
+      (Int.(=) (sign_to_int c1.s) 0) (Int.(=) (sign_to_int c2.s) 0)
+      (Int.(>=) (sign_to_int c1.s) 0) (Int.(>=) (sign_to_int c2.s) 0)
+      (Int.(<=) (sign_to_int c1.s) 0) (Int.(<=) (sign_to_int c2.s) 0)
+  
+  predicate phi_RND (cert: certificate) (a: array real) (eq: bool) =
+    (forall j: int. mem j cert.cINT -> is_integer a[j]) /\
+    (forall j: int. (lt_nat j n /\ not mem j cert.cINT) -> a[j] = 0.0) /\
+    not eq
+  
+  predicate phi_DIS (cert: certificate) (ci cj: constraint) =
+    (forall k: int. lt_nat k n -> ci.a[k] = cj.a[k]) /\
+    (forall k: int. mem k cert.cINT -> is_integer ci.a[k]) /\
+    (forall k: int. (lt_nat k n /\ not mem k cert.cINT) -> (ci.a[k] = 0.0)) /\
+    (is_integer ci.b) /\ (is_integer cj.b) /\
+    (ci.s <> Eq /\ cj.s <> Eq /\ ci.s <> cj.s) /\
+    (if ci.s = Geq then ci.b = cj.b + 1.0 else ci.b = cj.b - 1.0)
+  
+  predicate phi_DER_k (cert: certificate) (k: int) =
+    let k_total = Int.(+) k m in
+    let dc = cert.cDER[k] in
+    phi_ASM cert k /\
+    match dc.rsn, dc.data with
+    | Asm, D_none -> true
+    
+    | Lin, D_lin_comb weights -> 
+        (* phi_PRV *)
+        (forall j: int. (weights[j] <> 0.0 -> Int.(<) j k_total)) /\
+        phi_DOM_expanded
+          (init n (fun j -> (sum (fun i -> weights[i] * (get_constraint cert i).a[j]) 0 d)))
+          dc.con.a
+          (sum (fun i -> weights[i] * (get_constraint cert i).b) 0 d)
+          dc.con.b
+          (forall i: int. weights[i] <> 0.0 ->
+            weights[i] * (from_int (sign_to_int (get_constraint cert i).s)) = 0.0)
+          (Int.(=) (sign_to_int dc.con.s) 0)
+          (forall i: int. weights[i] <> 0.0 ->
+            weights[i] * (from_int (sign_to_int (get_constraint cert i).s)) >= 0.0)
+          (Int.(>=) (sign_to_int dc.con.s) 0)
+          (forall i: int. weights[i] <> 0.0 ->
+            weights[i] * (from_int (sign_to_int (get_constraint cert i).s)) <= 0.0)
+          (Int.(<=) (sign_to_int dc.con.s) 0)
+        
+    | Rnd, D_lin_comb weights -> 
+        (forall j: int. (weights[j] <> 0.0 -> Int.(<) j k_total)) /\
+        
+        let sumA = (init n (fun j -> (sum (fun i -> weights[i] * (get_constraint cert i).a[j]) 0 d))) in
+        let sumB = (sum (fun i -> weights[i] * (get_constraint cert i).b) 0 d) in
+        let eq = (forall i: int. weights[i] <> 0.0 ->
+          weights[i] * (from_int (sign_to_int (get_constraint cert i).s)) = 0.0) in
+        let geq = (forall i: int. weights[i] <> 0.0 ->
+          weights[i] * (from_int (sign_to_int (get_constraint cert i).s)) >= 0.0) in
+        let leq = (forall i: int. weights[i] <> 0.0 ->
+          weights[i] * (from_int (sign_to_int (get_constraint cert i).s)) <= 0.0) in
+          
+        phi_RND cert sumA eq /\
+        (sign_to_int dc.con.s) <> 0 /\
+        (
+        (
+        (forall j: int. lt_nat j n -> sumA[j] = 0.0) /\ 
+        (if geq then sumB > 0.0 else 
+          if leq then sumB < 0.0 else false)
+        )
+        \/
+        (
+        (forall j: int. lt_nat j n -> sumA[j] = dc.con.a[j]) /\ 
+        (if dc.con.s = Geq then (geq /\ (from_int (ceil sumB)) >= dc.con.b) else 
+          (leq /\ (from_int (floor sumB)) <= dc.con.b))
+        )
+        )
+        
+    | Uns, D_uns indices -> 
+        let i1 = indices[0] in
+        let l1 = indices[1] in
+        let i2 = indices[2] in
+        let l2 = indices[3] in
+        (Int.(>) k i1) /\ (Int.(>) k i2) /\ (Int.(>) k l1) /\ (Int.(>) k l2) /\
+        let ci1 = get_constraint cert i1 in
+        let cl1 = get_constraint cert l1 in
+        let ci2 = get_constraint cert i2 in
+        let cl2 = get_constraint cert l2 in
+        phi_DOM_constr ci1 dc.con /\ phi_DOM_constr ci2 dc.con /\ phi_DIS cert cl1 cl2
+    | Sol, D_none -> 
+        if p cert then 
+          exists sol: array real. (mem sol cert.cSOL /\ 
+            phi_DOM_constr { a = cert.cOBJ.c; b = dot cert.cOBJ.c sol; s = Leq } dc.con)
+          else exists sol: array real. (mem sol cert.cSOL /\ 
+            phi_DOM_constr { a = cert.cOBJ.c; b = dot cert.cOBJ.c sol; s = Geq } dc.con)
+    | _, _ -> false
+    end
+  
+  predicate phi_DER (cert: certificate) = 
+    let d_index = Int.(-) d 1 in
+    let cd = get_constraint cert d_index
+    in
+    (forall k: int. lt_nat k (Int.(-) d m) -> phi_DER_k cert k) /\
+    if not (r cert) then (phi_DOM_constr cd { a = make n 0.0; b = 1.0; s = Geq }
+    /\ (forall j:int. is_asm_index cert j -> not is_asm_of cert j d_index)) else
+      (
+      (
+      (p cert /\ plb cert) -> 
+        (
+        phi_DOM_constr cd { a = cert.cOBJ.c; b = (l cert); s = Geq } /\
+        (forall j:int. is_asm_index cert j -> not is_asm_of cert j d_index)
+        )
+      ) /\
+      (
+      (not p cert /\ pub cert) -> 
+        (
+        phi_DOM_constr cd { a = cert.cOBJ.c; b = (u cert); s = Leq } /\
+        (forall j:int. is_asm_index cert j -> not is_asm_of cert j d_index)
+        )
+      )
+      )
+  
+  predicate phi (cert: certificate) = phi_SOL cert /\ phi_DER cert
+  
+end
+
+
+theory Main
+
+  use import VIPRCertificate
+  use import VIPRHelpers
+  use import VIPRValidity
+  use import VIPRPredicate
+  use import int.Int
+  use import array.Array
+  use import set.Set
+  use import array.ArrayEq
+  
+  lemma LemmaFEAS: forall cert: certificate. is_cert cert -> (valid_FEAS cert <-> phi_FEAS cert)
+  
+  lemma u_matches_ub_when_interval:
+    forall cert: certificate, i: interval, ub_val: real.
+      cert.cRTP = Interval i ->
+      i.ub = UNum ub_val ->
+      u cert = ub_val
+  lemma pub_equiv_unum:
+    forall cert: certificate.
+      pub cert ->
+      exists i: interval.
+        cert.cRTP = Interval i /\ i.ub = UNum (u cert)
+  lemma l_matches_lb_when_interval:
+    forall cert: certificate, i: interval, lb_val: real.
+      cert.cRTP = Interval i ->
+      i.lb = LNum lb_val ->
+      l cert = lb_val
+  lemma plb_equiv_lnum:
+    forall cert: certificate.
+      plb cert ->
+      exists i: interval.
+        cert.cRTP = Interval i /\ i.lb = LNum (l cert)
+  lemma r_false_iff_infeasible:
+    forall cert: certificate.
+      cert.cRTP = Infeasible -> not (r cert)
+  
+  lemma LemmaSOL: forall cert: certificate. is_cert cert -> (valid_SOL cert <-> phi_SOL cert)
+
+  lemma singleton_membership_characterization:
+  forall s: set int, x: int.
+    mem x s /\
+    (forall j: int. j <> x -> not (mem j s)) <->
+    s = add x empty
+  
+  lemma singleton_mem_iff:
+  forall x y: int. mem x (add y empty) <-> x = y
+  
+  lemma is_asm_of_singleton:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    let dc = cert.cDER[k] in
+    dc.rsn = Asm -> dc.a_set = add (k + m) empty ->
+    forall j: int.
+      is_asm_of cert j (k + m) <-> j = k + m
+  
+  lemma is_asm_index_rsn:
+  forall cert: certificate, j: int.
+    is_cert cert -> is_asm_index cert j -> cert.cDER[j - m].rsn = Asm
+  
+  lemma set_extensionality_singleton:
+  forall s: set int, x: int.
+    (mem x s /\ forall y: int. y <> x -> not mem y s) -> s = add x empty
+  
+  lemma is_asm_of_iff_mem:
+  forall cert: certificate, k j: int.
+    is_cert cert -> 0 <= k < d - m -> j >= 0 ->
+    is_asm_of cert j (k + m) <-> mem j cert.cDER[k].a_set
+  
+  lemma a_set_singleton_iff_asm_of_form:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    (cert.cDER[k].a_set = add (k + m) empty <->
+     is_asm_of cert (k + m) (k + m) /\
+     (forall j: int.
+        j <> (k + m) -> not (is_asm_of cert j (k + m))))
+  
+  lemma asm_data_none:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    cert.cDER[k].rsn = Asm ->
+    cert.cDER[k].data = D_none
+
+  lemma LemmaASM:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    cert.cDER[k].rsn = Asm ->
+    valid_DER_k cert k <-> phi_DER_k cert k
+  
+  lemma array_extensionality_real:
+  forall a1 a2: array real.
+    length a1 = length a2 ->
+    (forall i: int. 0 <= i < length a1 -> a1[i] = a2[i]) ->
+    array_eq a1 a2
+  
+  lemma eq_sense_dom:
+  forall s1 s2: sign.
+    s1 = s2 -> (s1 = Eq <-> s2 = Eq)
+  
+  lemma dom_rhs_monotonic:
+  forall b1 b2: real.
+    Real.(<=) b1 b2 -> not (Real.(<) b2 b1)
+  
+  lemma sign_int_cases:
+  forall s: sign.
+    s = Eq \/ s = Geq \/ s = Leq
+  
+  lemma sign_to_int_cases:
+  forall s: sign.
+    (s = Eq -> sign_to_int s = 0) /\
+    (s = Geq -> sign_to_int s = 1) /\
+    (s = Leq -> sign_to_int s = -1)
+  
+  lemma int_cases_for_sign:
+  forall s: sign.
+    sign_to_int s = 0 \/ sign_to_int s = 1 \/ sign_to_int s = -1
+  
+  lemma sign_to_int_eq_zero:
+  forall s: sign. sign_to_int s = 0 -> s = Eq
+
+  lemma sign_to_int_of_eq:
+  sign_to_int Eq = 0
+  
+  lemma sign_to_int_eq_zero_iff_eq:
+  forall s: sign. sign_to_int s = 0 <-> s = Eq
+  
+  lemma sign_flags_eq:
+  forall s1 s2: sign.
+    (sign_to_int s1 = 0) -> (sign_to_int s2 = 0) ->
+    s1 = Eq /\ s2 = Eq
+  
+  lemma sign_flags_geq:
+  forall s1 s2: sign.
+    (sign_to_int s1 >= 0) -> (sign_to_int s2 >= 0) ->
+    (s1 = Eq \/ s1 = Geq) /\ (s2 = Eq \/ s2 = Geq)
+  
+  lemma sign_flags_leq:
+  forall s1 s2: sign.
+    (sign_to_int s1 <= 0) -> (sign_to_int s2 <= 0) ->
+    (s1 = Eq \/ s1 = Leq) /\ (s2 = Eq \/ s2 = Leq)
+    
+  lemma phi_DOM_absurdity:
+  forall c1 c2: constraint.
+    is_absurdity c1 -> phi_DOM_constr c1 c2
+  
+  lemma sign_flag_values_eq:
+  forall s1 s2: sign.
+    s1 = Eq /\ s2 = Eq ->
+    sign_to_int s1 = 0 /\ sign_to_int s2 = 0 /\
+    sign_to_int s1 >= 0 /\ sign_to_int s2 >= 0 /\
+    sign_to_int s1 <= 0 /\ sign_to_int s2 <= 0
+
+  lemma sign_flag_values_geq:
+    forall s1 s2: sign.
+      s1 = Geq /\ s2 = Geq ->
+      sign_to_int s1 = 1 /\ sign_to_int s2 = 1 /\
+      sign_to_int s1 >= 0 /\ sign_to_int s2 >= 0 /\
+      not (sign_to_int s1 = 0) /\ not (sign_to_int s2 = 0) /\
+      not (sign_to_int s1 <= 0) /\ not (sign_to_int s2 <= 0)
+
+  lemma sign_flag_values_leq:
+    forall s1 s2: sign.
+      s1 = Leq /\ s2 = Leq ->
+      sign_to_int s1 = -1 /\ sign_to_int s2 = -1 /\
+      sign_to_int s1 <= 0 /\ sign_to_int s2 <= 0 /\
+      not (sign_to_int s1 = 0) /\ not (sign_to_int s2 = 0) /\
+      not (sign_to_int s1 >= 0) /\ not (sign_to_int s2 >= 0)
+  
+  lemma eq_geq_flag_correspondence:
+  forall s1 s2: sign.
+    s1 = Eq /\ s2 = Geq ->
+    sign_to_int s1 = 0 /\ sign_to_int s2 >= 0 /\
+    not (sign_to_int s2 = 0)
+
+lemma flags_imply_eq_geq:
+  forall s1 s2: sign.
+    sign_to_int s1 = 0 /\ sign_to_int s2 >= 0 ->
+    (s1 = Eq /\ (s2 = Eq \/ s2 = Geq))
+lemma eq_leq_flag_correspondence:
+  forall s1 s2: sign.
+    s1 = Eq /\ s2 = Leq ->
+    sign_to_int s1 = 0 /\ sign_to_int s2 <= 0 /\
+    not (sign_to_int s2 = 0)
+lemma sign_flag_pattern_cases:
+  forall s1 s2: sign.
+    (s1 = Eq /\ s2 = Eq) \/
+    (s1 = Eq /\ s2 = Geq) \/
+    (s1 = Eq /\ s2 = Leq) \/
+    (s1 = Geq /\ s2 = Geq) \/
+    (s1 = Leq /\ s2 = Leq) ->
+    (* Corresponding flag combinations *)
+    match s1, s2 with
+    | Eq, Eq -> sign_to_int s1 = 0 /\ sign_to_int s2 = 0
+    | Eq, Geq -> sign_to_int s1 = 0 /\ sign_to_int s2 >= 0 /\ s2 <> Eq
+    | Eq, Leq -> sign_to_int s1 = 0 /\ sign_to_int s2 <= 0 /\ s2 <> Eq
+    | Geq, Geq -> sign_to_int s1 >= 0 /\ sign_to_int s2 >= 0
+    | Leq, Leq -> sign_to_int s1 <= 0 /\ sign_to_int s2 <= 0
+    | _, _ -> false
+    end
+
+  lemma phi_DOM_eq_case:
+  forall a1 a2: array real, b1 b2: real.
+    array_eq a1 a2 -> b1 = b2 ->
+    phi_DOM_expanded a1 a2 b1 b2 true true true true true true
+
+  lemma phi_DOM_geq_case:
+    forall a1 a2: array real, b1 b2: real.
+      array_eq a1 a2 -> Real.(>=) b1 b2 ->
+      phi_DOM_expanded a1 a2 b1 b2 false false true true false false
+
+  lemma phi_DOM_leq_case:
+    forall a1 a2: array real, b1 b2: real.
+      array_eq a1 a2 -> Real.(<=) b1 b2 ->
+      phi_DOM_expanded a1 a2 b1 b2 false false false false true true
+
+  lemma LemmaDOM:
+  forall c1 c2: constraint.
+    (is_constraint c1 /\ is_constraint c2) ->
+    con_dom_con c1 c2 <-> phi_DOM_constr c1 c2
+  
+  lemma LemmaLIN:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    cert.cDER[k].rsn = Lin ->
+    (forall j: int. 0 <= j < k -> valid_DER_k cert j) ->
+    valid_DER_k cert k <-> phi_DER_k cert k
+  
+  lemma LemmaRND_Predicate:
+  forall cert: certificate, con: constraint.
+    roundable cert con <-> phi_RND cert con.a (con.s = Eq)
+  
+  lemma LemmaRND:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    cert.cDER[k].rsn = Rnd ->
+    (forall j: int. 0 <= j < k -> valid_DER_k cert j) ->
+    valid_DER_k cert k <-> phi_DER_k cert k
+  
+  lemma LemmaDIS:
+  forall cert: certificate, c1 c2: constraint.
+    is_disjunction cert c1 c2 <-> phi_DIS cert c1 c2
+  
+  lemma LemmaUNS:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    cert.cDER[k].rsn = Uns ->
+    (forall j: int. 0 <= j < k -> valid_DER_k cert j) ->
+    valid_DER_k cert k <-> phi_DER_k cert k
+  
+  lemma LemmaSOL_valid:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    cert.cDER[k].rsn = Sol ->
+    (forall j: int. 0 <= j < k -> valid_DER_k cert j) ->
+    valid_DER_k cert k <-> phi_DER_k cert k
+
+  lemma LemmaDER_k:
+  forall cert: certificate, k: int.
+    is_cert cert -> 0 <= k < d - m ->
+    (forall j: int. 0 <= j < k -> valid_DER_k cert j) ->
+    valid_DER_k cert k <-> phi_DER_k cert k
+  
+  lemma LemmaDER: forall cert: certificate. is_cert cert -> (valid_DER cert <-> phi_DER cert)
+
+  goal MainTheorem: forall cert: certificate. is_cert cert -> (valid cert <-> phi cert)
+
+end
+
