@@ -177,7 +177,7 @@ theory VIPRCertificate
     (length cert.cDER = Int.(-) d m) /\ (* length of DER is d-m *)
     (forall idx: int. lt_nat idx (length cert.cDER) -> is_der_con cert.cDER[idx]) /\ (* each one is a derived constraint *)
     (forall idx: int. lt_nat idx (length cert.cDER) -> 
-      forall i: int. mem i cert.cDER[idx].a_set -> is_asm_index cert i) (* all assumptions of each one are assumptions *)
+      forall i: int. mem i cert.cDER[idx].a_set -> is_asm_index cert i /\ /\ Int. (<=) i idx) (* all assumptions of each one are assumptions, assumpt. come before *)
 
 
   lemma valid_reason_data_from_is_cert:
@@ -927,4 +927,5 @@ lemma sign_flag_pattern_cases:
   goal MainTheorem: forall cert: certificate. is_cert cert -> (valid cert <-> phi cert)
 
 end
+
 
