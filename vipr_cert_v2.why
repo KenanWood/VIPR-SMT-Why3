@@ -124,17 +124,12 @@ theory VIPRCertificate
     | D_uns (array int)            (* for Uns: array of 4 indices in [0, d) *)
   
   predicate valid_reason_data (r: reason) (rd: reason_data) =
-    match r, rd with
-    | Asm, D_none -> true
-    | Sol, D_none -> true
-    | Lin, D_lin_comb arr -> Array.length arr = d
-    | Rnd, D_lin_comb arr -> Array.length arr = d
-    | Uns, D_uns arr ->
-        Array.length arr = 4 /\
-        forall i: int. lt_nat i 4 ->
-          lt_nat arr[i] d
-    | _, _ -> false
-    end
+  ((r = Asm \/ r = Sol) /\ rd = D_none)
+  \/
+  ((r = Lin \/ r = Rnd) /\ (exists arr. rd = D_lin_comb arr /\ Array.length arr = d))
+  \/
+  (r = Uns /\ (exists arr. rd = D_uns arr /\ Array.length arr = 4 /\
+              (forall i:int. lt_nat i 4 -> lt_nat arr[i] d)))
   
   type derived_constraint = {
     con: constraint;
@@ -423,6 +418,7 @@ theory VIPRPredicate
   use import real.RealInfix
   use import real.FromInt
   use import real.Truncate
+
   use import array.Array
   use import set.Set
   use import Sum
