@@ -212,29 +212,26 @@ theory VIPRHelpers
     sgn: generalized_sign
   }
   function get_constraint (cert: certificate) (k: int) : constraint =
-    if Int.(<) k m then cert.cCON[k] else cert.cCON[Int.(-) k m]
+    if Int.(<) k m then cert.cCON[k] else cert.cDER[Int.(-) k m].con
     
   predicate is_absurdity (con: constraint) =
     (forall i: int. lt_nat i n -> con.a[i] = 0.0) /\
     match con.s with
     | Geq -> con.b > 0.0
     | Leq -> con.b < 0.0
-    | Eq -> false
+    | Eq -> con.b <> 0.0
     end
     
-  predicate con_dom_con (c1: constraint) (c2: constraint) =
-    (is_absurdity c1) \/
-    (
-      (array_eq c1.a c2.a) /\
-      match c1.s, c2.s with
-        | Eq, Geq -> c1.b >= c2.b
-        | Eq, Eq -> c1.b = c2.b
-        | Eq, Leq -> c1.b <= c2.b
-        | Geq, Geq -> c1.b >= c2.b
-        | Leq, Leq -> c1.b <= c2.b
-        | _, _ -> false
-      end
-    )
+  predicate con_dom_con (c1: constraint) (c2: constraint) = 
+  is_absurdity c1 \/
+  ( (forall j: int. lt_nat j n -> c1.a[j] = c2.a[j]) /\
+    ((c1.s = Eq /\ c2.s = Geq /\ c1.b >= c2.b) \/
+     (c1.s = Eq /\ c2.s = Eq  /\ c1.b = c2.b) \/
+     (c1.s = Eq /\ c2.s = Leq /\ c1.b <= c2.b) \/
+     (c1.s = Geq /\ c2.s = Geq /\ c1.b >= c2.b) \/
+     (c1.s = Leq /\ c2.s = Leq /\ c1.b <= c2.b))
+  )
+  
   
   predicate gen_con_dom_con (c1: generalized_constraint) (c2: constraint) =
     match c1.sgn with
@@ -927,5 +924,6 @@ lemma sign_flag_pattern_cases:
   goal MainTheorem: forall cert: certificate. is_cert cert -> (valid cert <-> phi cert)
 
 end
+
 
 
